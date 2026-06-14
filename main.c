@@ -1,10 +1,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
-#include <string.h>
-#include <sys/stat.h>
+#include <stdbool.h>
 #include <errno.h>
 #include <unistd.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <linux/limits.h>
 
 typedef struct {
     char magic[8];
@@ -94,10 +96,94 @@ static int create_archive(const char* target, char* const filenames[], size_t fi
     return 0;
 }
 
-static int extract_archive() {
-    // TODO Extract archive
-    fprintf(stderr, "ERROR: Extracting archive is not supported yet!\n");
-    return 1;
+static int extract_archive(const char* archive_path, const char* dest) {
+    FILE* archive = fopen(archive_path, "rb");
+    if (archive == NULL) {
+        perror("ERROR: Could not open archive file");
+        return 1;
+    }
+
+    ArchiveHeader header;
+    if (fread(&header, sizeof(ArchiveHeader), 1, archive) != 1) {
+        fprintf(stderr, "ERROR: Archive is corrupted\n");
+        fclose(archive);
+        return 1;
+    }
+
+    if (memcmp(header.magic, "BEEHIVE", 8) != 0) {
+        fprintf(stderr, "ERROR: Not a valid beehive archive\n");
+        fclose(archive);
+        return 1;
+    }
+
+    uint32_t file_count = header.file_count;
+    for (uint32_t i = 0; i < file_count; ++i) {
+        char* filename = NULL;
+        char* file_content = NULL;
+        FILE* fp = NULL;
+        int result = 0;
+
+        FileHeader file_header;
+        if (fread(&file_header, sizeof(FileHeader), 1, archive) != 1) {
+            fprintf(stderr, "ERROR: Could not read file header from the archive\n");
+            result = 1;
+            goto cleanup;
+        }
+
+        filename = malloc(file_header.filename_len + 1);
+        if (filename == NULL) {
+            fprintf(stderr, "ERROR: Buy more RAM!\n");
+            goto cleanup;
+        }
+
+        if (fread(filename, sizeof(char), file_header.filename_len, archive) != file_header.filename_len) {
+            fprintf(stderr, "ERROR: Could not read filename from the archive\n");
+            goto cleanup;
+        }
+        filename[file_header.filename_len] = '\0';
+
+        file_content = malloc(file_header.file_size);
+        if (file_content == NULL) {
+            fprintf(stderr, "ERROR: Buy more RAM!\n");
+            result = 1;
+            goto cleanup;
+        }
+
+        if (fread(file_content, sizeof(char), file_header.file_size, archive) != file_header.file_size) {
+            fprintf(stderr, "ERROR: Could not read file header from the archive\n");
+            result = 1;
+            goto cleanup;
+        }
+
+        // TODO Without proper directories support this will fail on nested paths
+        char full_path[PATH_MAX];
+        snprintf(full_path, sizeof(full_path), "%s/%s", dest, filename);
+
+        fp = fopen(full_path, "wb");
+        if (fp == NULL) {
+           perror("ERROR: Could not open file for writing");
+           result = 1;
+           goto cleanup;
+        }
+
+        if (fwrite(file_content, sizeof(char), file_header.file_size, fp) != file_header.file_size) {
+            fprintf(stderr, "ERROR: Could not open file for writing\n");
+            result = 1;
+            goto cleanup;
+        }
+
+    cleanup:
+        free(filename);
+        free(file_content);
+        if (fp) fclose(fp);
+        if (result != 0) {
+            fclose(archive);
+            return result;
+        }
+    }
+
+    fclose(archive);
+    return 0;
 }
 
 static int list_archive() {
@@ -120,6 +206,9 @@ int main(int argc, char* argv[]) {
         return 0;
     }
 
+
+    // TODO Add support for passing directory as a source file
+    // TODO Save permissions
     if (strcmp(command, "create") == 0) {
         if (argc < 4) {
             print_usage(program_name);
@@ -129,32 +218,42 @@ int main(int argc, char* argv[]) {
         char** filenames = &argv[3];
         size_t filenames_len = argc - 3;
 
-        char* final_target = NULL;
-        char* og_target = argv[2];
-        size_t og_target_len = strlen(og_target);
+        char* target = argv[2];
+        size_t target_len = strlen(target);
+        char target_buff[PATH_MAX];
 
-        if (og_target_len < 4 || strcmp(og_target + og_target_len - 4, ".bee") != 0) {
-            final_target = malloc(og_target_len + 5);
-            if (final_target != NULL) {
-                snprintf(final_target, og_target_len + 5, "%s.bee", og_target);
-            }
-        } else {
-            final_target = strdup(og_target);
-        }
+        if (target_len < 4 || strcmp(target + target_len - 4, ".bee") != 0) {
+            snprintf(target_buff, sizeof(target_buff), "%s.bee", target);
+            target = target_buff;
+        } 
 
-        if (final_target == NULL) {
-            fprintf(stderr, "ERROR: Buy more RAM!");
-            return 1;
-        }
+        int result = create_archive(target, filenames, filenames_len);
 
-        int result = create_archive(final_target, filenames, filenames_len);
-
-        free(final_target);
         return result;
     }
 
     if (strcmp(command, "extract") == 0) {
-        return extract_archive();
+        if (argc < 3) {
+            print_usage(program_name);
+            return 1;
+        }
+
+        char* archive_path = argv[2];
+        char* dest = NULL;
+        char cwd_buff[PATH_MAX];
+
+        if (argc >= 4 && *argv[3] != '\0') {
+            dest = argv[3];
+        } else {
+            if (getcwd(cwd_buff, sizeof(cwd_buff)) != NULL) {
+                dest = cwd_buff;
+            } else {
+                perror("ERROR: Could not get current working directory");
+                return 1;
+            }
+        }
+
+        return extract_archive(archive_path, dest);
     }
 
     if (strcmp(command, "list") == 0) {

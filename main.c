@@ -59,6 +59,21 @@ static int mkdir_p(const char *path) {
     return 0;
 }
 
+static bool is_safe_path(const char *path) {
+    if (path[0] == '\0' || path[0] == '/') {
+        return false;
+    }
+
+    for (size_t i = 0; path[i] != '\0'; i++) {
+        if (path[i] == '.' && path[i+1] == '.') {
+            if (i == 0 || path[i-1] == '/' || path[i+2] == '\0' || path[i+2] == '/') {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
 static int add_entry_to_archive(FILE *archive_fp, const char *abs_path, const char *rel_path, uint32_t *file_count) {
     struct stat st;
     if (stat(abs_path, &st) != 0) {
@@ -233,7 +248,14 @@ static int extract_archive(const char *archive_path, const char *dest) {
             result = 1;
             goto cleanup;
         }
+
         filename[file_header.filename_len] = '\0';
+
+        if (!is_safe_path(filename)) {
+            fprintf(stderr, "ERROR: filepath '%s' is not safe!. Archive was tempered with!\n", filename);
+            result = 1;
+            goto cleanup;
+        }
 
         if (file_header.type == ENTRY_TYPE_DIR) {
             char dir_full_path[PATH_MAX];

@@ -74,35 +74,40 @@ static bool is_safe_path(const char *path) {
     return true;
 }
 
-static int add_entry_to_archive(FILE *archive_fp, const char *abs_path, const char *rel_path, uint32_t *file_count) {
+static int add_entry_to_archive(FILE *archive_fp, const char *archive_abs_path, const char *entry_abs_path, const char *entry_rel_path, uint32_t *file_count) {
+    /* Skip the archive itself */
+    if (strcmp(archive_abs_path, entry_abs_path) == 0) {
+        return 0;
+    }
+
     struct stat st;
-    if (stat(abs_path, &st) != 0) {
-        fprintf(stderr, "ERROR: Could not stat file: '%s'. Reason: %s", abs_path, strerror(errno));
+    if (stat(entry_abs_path, &st) != 0) {
+        fprintf(stderr, "ERROR: Could not stat file: '%s'. Reason: %s", entry_abs_path, strerror(errno));
         return 1;
     }
 
     FileHeader file_header = {
-        .filename_len = (uint32_t)strlen(rel_path),
+        .filename_len = (uint32_t)strlen(entry_rel_path),
         .file_size = (uint64_t)st.st_size,
         .type = S_ISDIR(st.st_mode) ? 1 : 0,
     };
 
     if (fwrite(&file_header, sizeof(FileHeader), 1, archive_fp) != 1) {
-        fprintf(stderr, "ERROR: Could not write file header for %s\n", abs_path);
+        fprintf(stderr, "ERROR: Could not write file header for %s\n", entry_abs_path);
         return 1;
     }
 
-    if (fwrite(rel_path, 1, file_header.filename_len, archive_fp) != file_header.filename_len) {
-        fprintf(stderr, "ERROR: Could not write filename for %s\n", abs_path);
+    if (fwrite(entry_rel_path, 1, file_header.filename_len, archive_fp) != file_header.filename_len) {
+        fprintf(stderr, "ERROR: Could not write filename for %s\n", entry_abs_path);
         return 1;
     }
 
     (*file_count)++;
 
     if (file_header.type == ENTRY_TYPE_FILE) {
-        FILE *fp = fopen(abs_path, "rb");
+        FILE *fp = fopen(entry_abs_path, "rb");
         if (fp == NULL) {
-            fprintf(stderr, "ERROR: Could not open %s. Reason: %s\n", abs_path, strerror(errno));
+            fprintf(stderr, "ERROR: Could not open %s. Reason: %s\n", entry_abs_path, strerror(errno));
             return 1;
         }
 
@@ -110,7 +115,7 @@ static int add_entry_to_archive(FILE *archive_fp, const char *abs_path, const ch
         size_t bytes_read;
         while ((bytes_read = fread(buffer, 1, sizeof(buffer), fp)) > 0) {
             if (fwrite(buffer, 1, bytes_read, archive_fp) != bytes_read) {
-                fprintf(stderr, "ERROR: Could not write file data for %s\n", abs_path);
+                fprintf(stderr, "ERROR: Could not write file data for %s\n", entry_abs_path);
                 fclose(fp);
                 return 1;
             }
@@ -121,9 +126,9 @@ static int add_entry_to_archive(FILE *archive_fp, const char *abs_path, const ch
     } else if (file_header.type == ENTRY_TYPE_DIR) {
         int result = 0;
 
-        DIR *dir = opendir(abs_path);
+        DIR *dir = opendir(entry_abs_path);
         if (dir == NULL) {
-            fprintf(stderr, "ERROR: Could not open %s. Reason: %s\n", abs_path, strerror(errno));
+            fprintf(stderr, "ERROR: Could not open %s. Reason: %s\n", entry_abs_path, strerror(errno));
             goto cleanup;
         }
 
@@ -136,10 +141,10 @@ static int add_entry_to_archive(FILE *archive_fp, const char *abs_path, const ch
                 continue;
             }
 
-            snprintf(dir_entry_abs_path, sizeof(dir_entry_abs_path), "%s/%s", abs_path, entry->d_name);
-            snprintf(dir_entry_rel_path, sizeof(dir_entry_rel_path), "%s/%s", rel_path, entry->d_name);
+            snprintf(dir_entry_abs_path, sizeof(dir_entry_abs_path), "%s/%s", entry_abs_path, entry->d_name);
+            snprintf(dir_entry_rel_path, sizeof(dir_entry_rel_path), "%s/%s", entry_rel_path, entry->d_name);
 
-            result = add_entry_to_archive(archive_fp, dir_entry_abs_path, dir_entry_rel_path, file_count);
+            result = add_entry_to_archive(archive_fp, archive_abs_path, dir_entry_abs_path, dir_entry_rel_path, file_count);
             if (result != 0) goto cleanup;
         }
     cleanup:
@@ -160,6 +165,14 @@ static int create_archive(const char *target, char *const filenames[], size_t fi
 
     int result = 0;
     uint32_t file_count = 0;
+    char target_abs_path_buff[PATH_MAX];
+    char file_abs_path_buff[PATH_MAX];
+
+    if (realpath(target, target_abs_path_buff) == NULL) {
+        fprintf(stderr, "ERROR: Could not get absolute path for '%s'. Reason: %s\n", target, strerror(errno));
+        result = 1;
+        goto cleanup;
+    }
 
     ArchiveHeader archive_header;
     strncpy(archive_header.magic, "BEEHIVE", sizeof(archive_header.magic));
@@ -171,18 +184,19 @@ static int create_archive(const char *target, char *const filenames[], size_t fi
     }
 
     for (size_t i = 0; i < filenames_len; ++i) {
-        char abs_path[PATH_MAX];
-        if (realpath(filenames[i], abs_path) == NULL) {
+        if (realpath(filenames[i], file_abs_path_buff) == NULL) {
             fprintf(stderr, "ERROR: Could not get absolute path for %s. Reason: %s\n", filenames[i], strerror(errno));
             result = 1;
             goto cleanup;
         }
 
-        const char *last_slash = strrchr(abs_path, '/');
-        const char *rel_path = last_slash != NULL ? last_slash + 1 : abs_path;
+        const char *last_slash = strrchr(file_abs_path_buff, '/');
+        const char *rel_path = last_slash != NULL ? last_slash + 1 : file_abs_path_buff;
 
-        result = add_entry_to_archive(archive_fp, abs_path, rel_path, &file_count);
-        if (result != 0) goto cleanup;
+        result = add_entry_to_archive(archive_fp, target_abs_path_buff, file_abs_path_buff, rel_path, &file_count);
+        if (result != 0) {
+            goto cleanup;
+        }
     }
 
     archive_header.file_count = file_count;

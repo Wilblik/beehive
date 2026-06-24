@@ -323,10 +323,87 @@ static int extract_archive(const char *archive_path, const char *dest) {
     return 0;
 }
 
-static int list_archive(void) {
-    // TODO List archive
-    fprintf(stderr, "ERROR: Listing archive is not supported yet!\n");
-    return 1;
+static bool read_archive_header(FILE *archive_fp, ArchiveHeader *header) {
+    if (fread(header, sizeof(ArchiveHeader), 1, archive_fp) != 1) {
+        return false;
+    }
+
+    if (memcmp(header->magic, "BEEHIVE", 8) != 0) {
+        fprintf(stderr, "ERROR: Not a valid beehive archive\n");
+        return false;
+    }
+
+    return true;
+}
+
+static char *read_file_header(FILE *archive_fp, FileHeader *header) {
+    if (fread(header, sizeof(FileHeader), 1, archive_fp) != 1) {
+        fprintf(stderr, "ERROR: Could not read file header from the archive\n");
+        return NULL;
+    }
+
+    char *filename = malloc(header->filename_len + 1);
+    if (filename == NULL) {
+        fprintf(stderr, "ERROR: Buy more RAM!\n");
+        return NULL;
+    }
+
+    if (fread(filename, sizeof(char), header->filename_len, archive_fp) != header->filename_len) {
+        fprintf(stderr, "ERROR: Could not read filename from the archive\n");
+        return NULL;
+    }
+
+    filename[header->filename_len] = '\0';
+    return filename;
+}
+
+static int list_archive(const char *archive_path) {
+    FILE *archive_fp = fopen(archive_path, "rb");
+    if (archive_fp == NULL) {
+        fprintf(stderr, "ERROR: Could not open archive '%s'. Reason: %s\n", archive_path, strerror(errno));
+        return 1;
+    }
+
+    ArchiveHeader archive_header;
+    if (!read_archive_header(archive_fp, &archive_header)) {
+        fprintf(stderr, "ERROR: Archive is corrupted\n");
+        fclose(archive_fp);
+        return 1;
+    }
+
+    for (uint32_t i = 0; i < archive_header.file_count; ++i) {
+        FileHeader file_header;
+        char *filename = read_file_header(archive_fp, &file_header);
+        if (filename == NULL) {
+            fclose(archive_fp);
+            return 1;
+        }
+
+        if (file_header.type == ENTRY_TYPE_FILE) {
+            if (fseek(archive_fp, file_header.file_size, SEEK_CUR) != 0) {
+                fprintf(stderr, "ERROR: Could not seek to the end of file data. Reason: %s\n", strerror(errno));
+                fclose(archive_fp);
+                free(filename);
+                return 1;
+            }
+        }
+
+        int level = 0;
+        const char *p = filename;
+        while ((p = strchr(p, '/')) != NULL) {
+            level++;
+            p++;
+        }
+
+        const char *base_name = strrchr(filename, '/');
+        base_name = (base_name != NULL) ? base_name + 1 : filename;
+        printf("%*s%s\n", level * 4, "", base_name);
+
+        free(filename);
+    }
+
+    fclose(archive_fp);
+    return 0;
 }
 
 int main(int argc, char *argv[]) {
@@ -390,7 +467,12 @@ int main(int argc, char *argv[]) {
     }
 
     if (strcmp(command, "list") == 0) {
-        return list_archive();
+        if (argc < 3) {
+            print_usage(program_name);
+            return 1;
+        }
+
+        return list_archive(argv[2]);
     } 
 
     fprintf(stderr, "ERROR: Unknown command: %s\n", command);
